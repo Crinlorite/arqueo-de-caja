@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox
 import json
 import os
 import sys
+import subprocess
+import re
 from datetime import datetime
 
 CONFIG_FILE = "arqueo_config.json"
@@ -25,7 +27,7 @@ def load_config():
         with open(path, "r") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"fondo_fijo": 350.0, "unidades": {}}
+        return {"fondo_fijo": 350.0, "unidades": {}, "trabajador": "", "impresora": ""}
 
 
 def save_config(data):
@@ -106,9 +108,18 @@ class ArqueoCaja:
         self.total_label.grid(row=row, column=2, sticky="e", padx=4)
         row += 1
 
+        # Trabajador
+        trab_frame = ttk.Frame(main)
+        trab_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(trab_frame, text="Trabajador:", style="Header.TLabel").pack(side="left")
+        self.trabajador_var = tk.StringVar(value=config.get("trabajador", ""))
+        trab_entry = ttk.Entry(trab_frame, textvariable=self.trabajador_var, width=20,
+                               font=("Segoe UI", 10))
+        trab_entry.pack(side="left", padx=8)
+
         # Fondo fijo section
         fondo_frame = ttk.Frame(main)
-        fondo_frame.pack(fill="x", pady=(12, 0))
+        fondo_frame.pack(fill="x", pady=(6, 0))
 
         ttk.Label(fondo_frame, text="Fondo fijo de caja:", style="Header.TLabel").pack(side="left")
 
@@ -136,7 +147,13 @@ class ArqueoCaja:
         btn_frame.pack(fill="x", pady=(16, 0))
 
         ttk.Button(btn_frame, text="Limpiar campos", command=self._clear_all).pack(side="left", padx=(0, 8))
-        ttk.Button(btn_frame, text="Exportar resumen", command=self._export_summary).pack(side="left")
+        ttk.Button(btn_frame, text="Exportar resumen", command=self._export_summary).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="🖨 Imprimir", command=self._print_summary).pack(side="left", padx=(0, 8))
+
+        btn_frame2 = ttk.Frame(main)
+        btn_frame2.pack(fill="x", pady=(6, 0))
+        ttk.Button(btn_frame2, text="📂 Cargar sesión anterior", command=self._show_load_dialog).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame2, text="⚙ Configuración", command=self._show_config).pack(side="left")
 
         # Restore saved units
         saved_units = config.get("unidades", {})
@@ -218,10 +235,13 @@ class ArqueoCaja:
         save_config({
             "fondo_fijo": self._get_fondo(),
             "unidades": unidades,
+            "trabajador": self.trabajador_var.get(),
+            "impresora": self.config.get("impresora", ""),
         })
 
     def _on_close(self):
         self._save_state()
+        self._export_summary(silent=True)
         self.root.destroy()
 
     def _clear_all(self):
@@ -233,27 +253,25 @@ class ArqueoCaja:
             return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.abspath(__file__))
 
-    def _export_summary(self):
+    def _build_ticket(self):
         now = datetime.now()
         fecha = now.strftime("%d/%m/%Y")
         hora = now.strftime("%H:%M")
-        filename_ts = now.strftime("%Y-%m-%d_%H-%M")
 
         lines = []
-        lines.append("=" * 40)
-        lines.append("         ARQUEO DE CAJA")
-        lines.append("=" * 40)
-        lines.append(f"  Fecha:  {fecha}")
-        lines.append(f"  Hora:   {hora}")
-        lines.append("-" * 40)
-        lines.append("")
+        lines.append("==================")
+        lines.append("  ARQUEO DE CAJA")
+        lines.append("==================")
+        lines.append(f"Fecha: {fecha} {hora}")
+        trabajador = self.trabajador_var.get().strip()
+        if trabajador:
+            lines.append(f"Trab: {trabajador}")
+        lines.append("------------------")
 
-        total = 0.0
         total_billetes = 0.0
         total_monedas = 0.0
 
-        lines.append("  BILLETES")
-        lines.append("  " + "-" * 36)
+        lines.append("BILLETES")
         for i, denom in enumerate(self.all_denominations):
             if denom not in BILLETES:
                 continue
@@ -262,12 +280,10 @@ class ArqueoCaja:
                 sub = denom * units
                 total_billetes += sub
                 label = f"{int(denom)}€" if denom == int(denom) else f"{denom:.2f}€"
-                lines.append(f"  {label:>8} x {units:<6} = {sub:>10.2f}€")
-        lines.append(f"  {'Subtotal billetes:':>28} {total_billetes:>8.2f}€")
-        lines.append("")
+                lines.append(f" {label} x{units} = {sub:.2f}€")
+        lines.append(f"Sub: {total_billetes:.2f}€")
 
-        lines.append("  MONEDAS")
-        lines.append("  " + "-" * 36)
+        lines.append("MONEDAS")
         for i, denom in enumerate(self.all_denominations):
             if denom not in MONEDAS:
                 continue
@@ -276,25 +292,27 @@ class ArqueoCaja:
                 sub = denom * units
                 total_monedas += sub
                 label = f"{int(denom)}€" if denom >= 1 and denom == int(denom) else f"{denom:.2f}€"
-                lines.append(f"  {label:>8} x {units:<6} = {sub:>10.2f}€")
-        lines.append(f"  {'Subtotal monedas:':>28} {total_monedas:>8.2f}€")
-        lines.append("")
+                lines.append(f" {label} x{units} = {sub:.2f}€")
+        lines.append(f"Sub: {total_monedas:.2f}€")
 
         total = total_billetes + total_monedas
         fondo = self._get_fondo()
         resultado = total - fondo
         sign = "+" if resultado >= 0 else ""
 
-        lines.append("=" * 40)
-        lines.append(f"  TOTAL ARQUEO:    {total:>18.2f}€")
-        lines.append(f"  FONDO FIJO:      {fondo:>18.2f}€")
-        lines.append("-" * 40)
-        lines.append(f"  RESULTADO:       {sign}{resultado:>17.2f}€")
-        lines.append("=" * 40)
+        lines.append("==================")
+        lines.append(f"TOTAL: {total:.2f}€")
+        lines.append(f"FONDO: {fondo:.2f}€")
+        lines.append("------------------")
+        lines.append(f"RESULTADO: {sign}{resultado:.2f}€")
+        lines.append("==================")
 
-        text = "\n".join(lines)
+        return "\n".join(lines), now
 
-        # Save to file
+    def _export_summary(self, silent=False):
+        text, now = self._build_ticket()
+        filename_ts = now.strftime("%Y-%m-%d_%H-%M")
+
         export_dir = os.path.join(self._get_base_dir(), "arqueos")
         os.makedirs(export_dir, exist_ok=True)
         filepath = os.path.join(export_dir, f"arqueo_{filename_ts}.txt")
@@ -302,7 +320,265 @@ class ArqueoCaja:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(text)
 
-        messagebox.showinfo("Exportado", f"Resumen guardado en:\n{filepath}")
+        if not silent:
+            messagebox.showinfo("Exportado", f"Resumen guardado en:\n{filepath}")
+
+        return filepath
+
+    def _get_printers(self):
+        """List available printers via PowerShell."""
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-Printer | Select-Object -ExpandProperty Name"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            printers = [p.strip() for p in result.stdout.strip().splitlines() if p.strip()]
+            return printers
+        except Exception:
+            return []
+
+    def _print_summary(self):
+        filepath = self._export_summary(silent=True)
+        printer = self.config.get("impresora", "")
+        if not printer:
+            messagebox.showwarning("Sin impresora",
+                                   "No hay impresora configurada.\nVe a Configuración para seleccionar una.")
+            return
+        try:
+            # Set configured printer as system default
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(New-Object -ComObject WScript.Network).SetDefaultPrinter('{printer}')"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            # Set Notepad margins to 0
+            reg_path = r"Software\Microsoft\Notepad"
+            import winreg
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE)
+                for margin in ("iMarginLeft", "iMarginRight", "iMarginTop", "iMarginBottom"):
+                    winreg.SetValueEx(key, margin, 0, winreg.REG_DWORD, 0)
+                # Remove header/footer
+                winreg.SetValueEx(key, "szHeader", 0, winreg.REG_SZ, "")
+                winreg.SetValueEx(key, "szTrailer", 0, winreg.REG_SZ, "")
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+            # Print via notepad /P
+            subprocess.Popen(
+                ["notepad.exe", "/P", filepath],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception as e:
+            messagebox.showerror("Error al imprimir", str(e))
+
+    def _show_config(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Configuración")
+        dialog.resizable(False, False)
+        dialog.configure(bg="#f5f5f5")
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Impresora por defecto:", style="Header.TLabel").pack(
+            padx=16, pady=(12, 6), anchor="w")
+
+        frame = ttk.Frame(dialog)
+        frame.pack(padx=16, fill="both", expand=True)
+
+        listbox = tk.Listbox(frame, font=("Segoe UI", 10), width=45, height=8)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        printers = self._get_printers()
+        current = self.config.get("impresora", "")
+
+        if not printers:
+            listbox.insert("end", "(No se encontraron impresoras)")
+        else:
+            for i, name in enumerate(printers):
+                prefix = "✔ " if name == current else "   "
+                listbox.insert("end", f"{prefix}{name}")
+                if name == current:
+                    listbox.selection_set(i)
+
+        # Current printer label
+        status_var = tk.StringVar(value=f"Actual: {current}" if current else "Actual: (ninguna)")
+        ttk.Label(dialog, textvariable=status_var, font=("Segoe UI", 9),
+                  background="#f5f5f5", foreground="#7f8c8d").pack(padx=16, anchor="w")
+
+        def on_save():
+            sel = listbox.curselection()
+            if not sel or not printers:
+                return
+            selected = printers[sel[0]]
+            self.config["impresora"] = selected
+            self._save_state()
+            dialog.destroy()
+            messagebox.showinfo("Configuración", f"Impresora guardada:\n{selected}")
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=(8, 12))
+        ttk.Button(btn_frame, text="Guardar", command=on_save).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side="left")
+
+    def _scan_arqueos(self):
+        """Scan arqueos/ folder and return list of (display_label, filepath)."""
+        export_dir = os.path.join(self._get_base_dir(), "arqueos")
+        if not os.path.isdir(export_dir):
+            return []
+
+        results = []
+        for fname in sorted(os.listdir(export_dir), reverse=True):
+            if not fname.startswith("arqueo_") or not fname.endswith(".txt"):
+                continue
+            fpath = os.path.join(export_dir, fname)
+            # Parse header to build a friendly label
+            trabajador = ""
+            fecha = ""
+            hora = ""
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("Fecha:"):
+                            # "Fecha: 15/03/2026 12:00" or "Fecha: 15/03/2026  Hora: 12:00"
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                fecha = parts[1]
+                            if "Hora:" in parts:
+                                idx = parts.index("Hora:")
+                                if idx + 1 < len(parts):
+                                    hora = parts[idx + 1]
+                            elif len(parts) >= 3:
+                                hora = parts[2]
+                        elif line.startswith("Trab:") or line.startswith("Trabajador:"):
+                            trabajador = line.split(":", 1)[1].strip()
+                        elif line.startswith("-") and fecha:
+                            break
+            except Exception:
+                continue
+
+            label = f"{fecha}  {hora}"
+            if trabajador:
+                label += f"  —  {trabajador}"
+            results.append((label, fpath))
+
+        return results
+
+    def _show_load_dialog(self):
+        all_arqueos = self._scan_arqueos()
+        if not all_arqueos:
+            messagebox.showinfo("Cargar sesión", "No hay arqueos guardados.")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Cargar sesión anterior")
+        dialog.resizable(False, False)
+        dialog.configure(bg="#f5f5f5")
+        dialog.grab_set()
+
+        # Filter by date
+        filter_frame = ttk.Frame(dialog)
+        filter_frame.pack(padx=16, pady=(12, 6), fill="x")
+        ttk.Label(filter_frame, text="Filtrar por fecha:", style="Header.TLabel").pack(side="left")
+        filter_var = tk.StringVar(value="")
+        filter_entry = ttk.Entry(filter_frame, textvariable=filter_var, width=12,
+                                 font=("Segoe UI", 10))
+        filter_entry.pack(side="left", padx=8)
+        ttk.Label(filter_frame, text="(día, año, trabajador...)").pack(side="left")
+
+        frame = ttk.Frame(dialog)
+        frame.pack(padx=16, fill="both", expand=True)
+
+        listbox = tk.Listbox(frame, font=("Segoe UI", 10), width=40, height=12)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Keep filtered list in sync
+        filtered = []
+
+        def refresh_list(*_):
+            nonlocal filtered
+            listbox.delete(0, "end")
+            filtered.clear()
+            query = filter_var.get().strip()
+            for label, fpath in all_arqueos:
+                # Filter: each word must match somewhere in the label
+                if query:
+                    words = query.lower().split()
+                    label_lower = label.lower()
+                    if not all(w in label_lower for w in words):
+                        continue
+                filtered.append((label, fpath))
+            for label, _ in filtered:
+                listbox.insert("end", label)
+            if filtered:
+                listbox.selection_set(0)
+
+        filter_var.trace_add("write", refresh_list)
+        refresh_list()
+
+        def on_load():
+            sel = listbox.curselection()
+            if not sel or sel[0] >= len(filtered):
+                return
+            _, fpath = filtered[sel[0]]
+            dialog.destroy()
+            self._load_from_file(fpath)
+
+        ttk.Button(dialog, text="Cargar", command=on_load).pack(pady=(8, 12))
+        listbox.bind("<Double-1>", lambda e: on_load())
+
+    def _load_from_file(self, filepath):
+        """Parse a ticket txt and restore values into the UI."""
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
+            return
+
+        # Clear all fields first
+        self._clear_all()
+
+        # Parse trabajador
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Trab:") or stripped.startswith("Trabajador:"):
+                self.trabajador_var.set(stripped.split(":", 1)[1].strip())
+            elif stripped.startswith("FONDO:"):
+                # "FONDO:               350.00€"
+                val = stripped.replace("FONDO:", "").replace("€", "").strip()
+                try:
+                    self.fondo_var.set(str(float(val)))
+                except ValueError:
+                    pass
+
+        # Parse denomination lines: " {label:>6} x{units:<4}= {sub:>8.2f}€"
+        denom_pattern = re.compile(r"^\s*([\d.]+)€\s*x(\d+)\s*=")
+        for line in content.splitlines():
+            m = denom_pattern.match(line.strip())
+            if m:
+                denom_str = m.group(1)
+                units_str = m.group(2)
+                try:
+                    denom_val = float(denom_str)
+                except ValueError:
+                    continue
+                # Find matching denomination index
+                for i, d in enumerate(self.all_denominations):
+                    if abs(d - denom_val) < 0.001:
+                        self.entries[i].set(units_str)
+                        break
+
+        self._update_totals()
 
 
 def main():
