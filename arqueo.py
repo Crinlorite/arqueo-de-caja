@@ -5,6 +5,7 @@ import os
 import sys
 import subprocess
 import re
+import time
 from datetime import datetime
 
 CONFIG_FILE = "arqueo_config.json"
@@ -37,6 +38,13 @@ def save_config(data):
 
 
 class ArqueoCaja:
+    # ── ESC/POS — Epson TM-T20 ────────────────────────────────────────────────
+    _ESC_INIT     = b'\x1b\x40'
+    _ESC_CP858    = b'\x1b\x74\x13'   # CP858: español + €
+    _ESC_CENTER   = b'\x1b\x61\x01'
+    _ESC_BOLD_ON  = b'\x1b\x45\x01'
+    _ESC_BOLD_OFF = b'\x1b\x45\x00'
+    _CUT_FULL     = b'\n\n\n\n\n\x1d\x56\x00'  # 4 líneas de avance + corte
     def __init__(self, root):
         self.root = root
         self.root.title("Arqueo de Caja")
@@ -339,39 +347,38 @@ class ArqueoCaja:
         except Exception:
             return []
 
+    def _raw_print(self, data: bytes, printer: str):
+        """Envía bytes RAW directamente a la impresora (sin GDI ni márgenes)."""
+        import win32print
+        h = win32print.OpenPrinter(printer)
+        try:
+            win32print.StartDocPrinter(h, 1, ("Arqueo", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(h)
+                win32print.WritePrinter(h, data)
+                win32print.EndPagePrinter(h)
+            finally:
+                win32print.EndDocPrinter(h)
+        finally:
+            win32print.ClosePrinter(h)
+
     def _print_summary(self):
-        filepath = self._export_summary(silent=True)
         printer = self.config.get("impresora", "")
         if not printer:
             messagebox.showwarning("Sin impresora",
                                    "No hay impresora configurada.\nVe a Configuración para seleccionar una.")
             return
+        self._export_summary(silent=True)
+        text, _ = self._build_ticket()
         try:
-            # Set configured printer as system default
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 f"(New-Object -ComObject WScript.Network).SetDefaultPrinter('{printer}')"],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+            payload = (
+                self._ESC_INIT
+                + self._ESC_CP858
+                + self._ESC_CENTER
+                + text.encode("cp858", errors="replace")
+                + self._CUT_FULL
             )
-            # Set Notepad margins to 0
-            reg_path = r"Software\Microsoft\Notepad"
-            import winreg
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE)
-                for margin in ("iMarginLeft", "iMarginRight", "iMarginTop", "iMarginBottom"):
-                    winreg.SetValueEx(key, margin, 0, winreg.REG_DWORD, 0)
-                # Remove header/footer
-                winreg.SetValueEx(key, "szHeader", 0, winreg.REG_SZ, "")
-                winreg.SetValueEx(key, "szTrailer", 0, winreg.REG_SZ, "")
-                winreg.CloseKey(key)
-            except Exception:
-                pass
-            # Print via notepad /P
-            subprocess.Popen(
-                ["notepad.exe", "/P", filepath],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            self._raw_print(payload, printer)
         except Exception as e:
             messagebox.showerror("Error al imprimir", str(e))
 
@@ -382,7 +389,7 @@ class ArqueoCaja:
         dialog.configure(bg="#f5f5f5")
         dialog.grab_set()
 
-        ttk.Label(dialog, text="Impresora por defecto:", style="Header.TLabel").pack(
+        ttk.Label(dialog, text="Impresora de la app:", style="Header.TLabel").pack(
             padx=16, pady=(12, 6), anchor="w")
 
         frame = ttk.Frame(dialog)
